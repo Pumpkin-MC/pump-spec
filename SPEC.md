@@ -1,424 +1,747 @@
-# PUMP World Region & Chunk Format Specification
+# The PUMP World Region & Chunk Storage Format Specification
 
-**Version:** 1.0  
-**Status:** Stable / Standard  
-**Authors:** Pumpkin Contributors  
-**License:** MIT OR Apache-2.0  
+**Document Version:** 1.0.0 (Release)  
+**Specification Status:** Ratified Standard  
+**Target Architecture:** Minecraft: Java Edition World Storage  
+**Standard Authority:** Pumpkin Project / Pumpkin Contributors  
+**License:** [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)  
+
+---
+
+## Abstract
+
+This document defines the normative specification for the **PUMP** storage architecture, comprising the `.pump` region container format and the `PCHK` native chunk payload schema. PUMP specifies an optimized, atomic, crash-resilient, and computationally efficient binary world storage format designed to supersede legacy Anvil (`.mca`) region storage.
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#1-overview)
-   - [Design Goals](#design-goals)
-   - [Comparison with Anvil & Linear](#comparison-with-anvil--linear)
-2. [Region Container (`.pump`)](#2-region-container-pump)
-   - [File Naming & Region Coordinates](#file-naming--region-coordinates)
-   - [Sector Alignment](#sector-alignment)
-   - [Header Structure](#header-structure)
-   - [Sector Allocation & Fragmentation](#sector-allocation--fragmentation)
-   - [Crash Resilience & Write Ordering](#crash-resilience--write-ordering)
-3. [Chunk Compression Envelope](#3-chunk-compression-envelope)
-   - [Frame Header](#frame-header)
-   - [Compression Algorithm](#compression-algorithm)
-   - [Integrity Checksum](#integrity-checksum)
-4. [Native Chunk Payload (`PCHK` v1)](#4-native-chunk-payload-pchk-v1)
-   - [Chunk Header](#chunk-header)
-   - [Heightmaps](#heightmaps)
-   - [Sections](#sections)
-     - [Block Palette & States](#block-palette--states)
-     - [Biome Palette & States](#biome-palette--states)
-     - [Light Arrays](#light-arrays)
-   - [Scheduled Ticks](#scheduled-ticks)
-   - [Block Entities](#block-entities)
-   - [Custom Data](#custom-data)
-5. [Anvil Compatibility & Mapping](#5-anvil-compatibility--mapping)
-6. [Security & Resource Bounds](#6-security--resource-bounds)
+- [Chapter 1: Document Conventions & Conformance](#chapter-1-document-conventions--conformance)
+  - [1.1 Normative Terminology](#11-normative-terminology)
+  - [1.2 Definitions](#12-definitions)
+  - [1.3 Conformance Requirements](#13-conformance-requirements)
+- [Chapter 2: Numerical Representations & Coordinate Systems](#chapter-2-numerical-representations--coordinate-systems)
+  - [2.1 Primitive Types & Byte Ordering](#21-primitive-types--byte-ordering)
+  - [2.2 Coordinate Spaces & Partitioning](#22-coordinate-spaces--partitioning)
+  - [2.3 Indexing Algorithms](#23-indexing-algorithms)
+- [Chapter 3: Region Container Architecture (`.pump`)](#chapter-3-region-container-architecture-pump)
+  - [3.1 Container Overview](#31-container-overview)
+  - [3.2 Sector Subsystem](#32-sector-subsystem)
+  - [3.3 Header Hierarchy](#33-header-hierarchy)
+    - [3.3.1 Superblock (`PumpSuperblock`)](#331-superblock-pumpsuperblock)
+    - [3.3.2 Chunk Location Table (`PumpChunkEntry`)](#332-chunk-location-table-pumpchunkentry)
+  - [3.4 Sector Allocation and File Truncation](#34-sector-allocation-and-file-truncation)
+- [Chapter 4: Compression Envelope & Frame Format](#chapter-4-compression-envelope--frame-format)
+  - [4.1 Frame Header (`PumpChunkFrameHeader`)](#41-frame-header-pumpchunkframeheader)
+  - [4.2 Compression Subsystem (Zstandard)](#42-compression-subsystem-zstandard)
+  - [4.3 Integrity Verification (XXH64)](#43-integrity-verification-xxh64)
+- [Chapter 5: Native Chunk Payload Schema (`PCHK` v1)](#chapter-5-native-chunk-payload-schema-pchk-v1)
+  - [5.1 Chunk Payload Header (`PumpChunkHeader`)](#51-chunk-payload-header-pumpchunkheader)
+  - [5.2 Packed Heightmaps](#52-packed-heightmaps)
+  - [5.3 Sub-Chunk Section Stack](#53-sub-chunk-section-stack)
+    - [5.3.1 Section Geometry](#531-section-geometry)
+    - [5.3.2 Block State Palette and Data](#532-block-state-palette-and-data)
+    - [5.3.3 Biome Palette and Data](#533-biome-palette-and-data)
+    - [5.3.4 Nibble Lighting Arrays](#534-nibble-lighting-arrays)
+  - [5.4 Scheduled Tick Queues](#54-scheduled-tick-queues)
+  - [5.5 Block Entity Storage](#55-block-entity-storage)
+  - [5.6 Custom Metadata Extension](#56-custom-metadata-extension)
+- [Chapter 6: Transaction Lifecycle & Consistency Model](#chapter-6-transaction-lifecycle--consistency-model)
+  - [6.1 Read Operation Sequence](#61-read-operation-sequence)
+  - [6.2 Atomic Commit Write Protocol](#62-atomic-commit-write-protocol)
+  - [6.3 Crash Consistency Guarantees](#63-crash-consistency-guarantees)
+- [Chapter 7: Security Considerations & Resource Bounds](#chapter-7-security-considerations--resource-bounds)
+  - [7.1 Denial of Service & Memory Exhaustion Bounds](#71-denial-of-service--memory-exhaustion-bounds)
+  - [7.2 Structural Validation Invariants](#72-structural-validation-invariants)
+- [Appendix A: Rust Data Type Bindings](#appendix-a-rust-data-type-bindings)
+- [Appendix B: Anvil Compatibility and Transcoding](#appendix-b-anvil-compatibility-and-transcoding)
 
 ---
 
-## 1. Overview
+## Chapter 1: Document Conventions & Conformance
 
-The **PUMP** format is a high-performance, crash-resilient world region and chunk storage system designed to replace the legacy Minecraft **Anvil** (`.mca`) format.
+### 1.1 Normative Terminology
 
-### Design Goals
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **SHOULD**, **SHOULD NOT**, **RECOMMENDED**, **NOT RECOMMENDED**, **MAY**, and **OPTIONAL** in this document are to be interpreted as described in BCP 14 [RFC 2119] [RFC 8174] when, and only when, they appear in all capitals, as shown here.
 
-1. **Sub-Kilobyte Sector Granularity:** Anvil's 4 KiB sectors lead to severe internal fragmentation (slack space) when storing compressed chunks. PUMP utilizes **256-byte sectors**, reducing tail padding waste by up to 16×.
-2. **True Crash Resilience:** PUMP implements copy-on-write chunk allocation with strict write barriers. Chunk data is fully flushed to disk before updating the in-file allocation table, guaranteeing that a sudden crash or power failure leaves every chunk intact in either its previous or updated state without torn writes.
-3. **No NBT Overhead for Bulk Data:** Java NBT is inefficient for bulk tabular data such as block states, biomes, heightmaps, and lighting arrays. PUMP introduces `PCHK`, a native binary representation with compact bit-packing, while preserving standard unnamed NBT exclusively for dynamic block entities and arbitrary custom data.
-4. **Fast Modern Compression:** Uses **Zstandard (zstd)** with parallel compression and decompression on multi-core worker threads, coupled with **XXH64** checksums for rapid validation.
+### 1.2 Definitions
 
-### Comparison with Anvil & Linear
+* **Region Container:** A single host filesystem file containing metadata and packed chunk payloads for a bounded $32 \times 32$ horizontal chunk domain.
+* **Superblock:** The initial 256-byte sector of a region container specifying format signatures, format version, and geographic coordinate alignment.
+* **Chunk Location Table:** The fixed-size array of offset/length tuples defining the physical location and byte length of all indexed chunks within a region.
+* **Sector:** The smallest atomic storage allocation unit in a `.pump` container, precisely fixed at $256$ bytes.
+* **Slack Space (Internal Fragmentation):** Unused tail bytes between the final valid byte of an allocated record and the bounding sector edge.
+* **Chunk Frame:** The contiguous byte stream encompassing the compression metadata header and the Zstandard-compressed payload.
+* **Chunk Payload (`PCHK`):** The fully uncompressed, binary-serialized representation of an individual Minecraft chunk.
+* **Section:** A cubic spatial volume of $16 \times 16 \times 16$ blocks.
+* **Biome Cell:** A cubic spatial volume of $4 \times 4 \times 4$ blocks representing the minimum resolution for biome distribution.
+* **Homogeneous:** A storage mode wherein all discrete elements within a section or biome volume share an identical single state identifier.
+* **Valid Usage (VU):** Normative preconditions, invariants, and structural constraints that **SHALL** be satisfied by conforming implementations.
 
-| Feature | Anvil (`.mca`) | Linear (`.linear`) | PUMP (`.pump`) |
+### 1.3 Conformance Requirements
+
+A conforming implementation **SHALL** be classified into one or both of the following profiles:
+
+1. **Conforming Reader:** An implementation capable of parsing, validating, and deserializing arbitrary valid PUMP containers and `PCHK` payloads while strictly rejecting non-conformant structures.
+2. **Conforming Writer:** An implementation capable of generating valid PUMP containers and `PCHK` payloads that satisfy all Valid Usage clauses, adhere to transaction write barriers, and maintain format invariants.
+
+---
+
+## Chapter 2: Numerical Representations & Coordinate Systems
+
+### 2.1 Primitive Types & Byte Ordering
+
+Unless explicitly denoted otherwise, all multi-byte numerical fields in PUMP and `PCHK` **SHALL** be serialized in **Network Byte Order (Big-Endian)**.
+
+| Type Identifier | Bit Width | Binary Representation | Value Range |
 | :--- | :--- | :--- | :--- |
-| **Sector Granularity** | 4096 bytes | None (stream-based) | **256 bytes** |
-| **Slack Space Waste** | High (~2 KiB per chunk) | Zero | **Low (<128 bytes per chunk)** |
-| **Write Amplification** | Low (sector-based) | High (entire region rewritten) | **Low (only modified chunks written)** |
-| **Parallel I/O & Compaction** | Limited | Single stream | **Independent chunk compression** |
-| **Bulk Chunk Payload** | Java NBT (heavy) | Java NBT (heavy) | **`PCHK` Binary (zero NBT overhead)** |
-| **Block Entities / Custom Data** | Java NBT | Java NBT | **Unnamed Java NBT** |
-| **Crash Safety** | Partial (unprotected overwrite) | Atomic rename (`.tmp`) | **Copy-on-write sector updates** |
-| **Integrity Validation** | None (ad-hoc zlib/gzip) | XXH64 | **XXH64** |
+| `u8` | 8 | Unsigned integer | $[0, 255]$ |
+| `i8` | 8 | Two's-complement signed integer | $[-128, 127]$ |
+| `u16` | 16 | Unsigned integer (Big-Endian) | $[0, 65535]$ |
+| `i16` | 16 | Two's-complement signed integer (Big-Endian) | $[-32768, 32767]$ |
+| `u32` | 32 | Unsigned integer (Big-Endian) | $[0, 2^{32} - 1]$ |
+| `i32` | 32 | Two's-complement signed integer (Big-Endian) | $[-2^{31}, 2^{31} - 1]$ |
+| `u64` | 64 | Unsigned integer (Big-Endian) | $[0, 2^{64} - 1]$ |
+| `i64` | 64 | Two's-complement signed integer (Big-Endian) | $[-2^{63}, 2^{63} - 1]$ |
+
+Floating-point quantities, where referenced, **SHALL** conform to the IEEE 754-2008 standard (`f32`, `f64`).
+
+### 2.2 Coordinate Spaces & Partitioning
+
+* **World Block Space:** $\mathbf{P}_{\text{world}} = (X_{\text{world}}, Y_{\text{world}}, Z_{\text{world}}) \in \mathbb{Z}^3$.
+* **Chunk Space:** $\mathbf{C} = (X_{\text{chunk}}, Z_{\text{chunk}}) \in \mathbb{Z}^2$, where:
+  $$X_{\text{chunk}} = \lfloor X_{\text{world}} / 16 \rfloor, \quad Z_{\text{chunk}} = \lfloor Z_{\text{world}} / 16 \rfloor$$
+* **Region Space:** $\mathbf{R} = (X_{\text{region}}, Z_{\text{region}}) \in \mathbb{Z}^2$, where:
+  $$X_{\text{region}} = \lfloor X_{\text{chunk}} / 32 \rfloor = \lfloor X_{\text{world}} / 512 \rfloor$$
+  $$Z_{\text{region}} = \lfloor Z_{\text{chunk}} / 32 \rfloor = \lfloor Z_{\text{world}} / 512 \rfloor$$
+
+### 2.3 Indexing Algorithms
+
+#### 2.3.1 Region Chunk Index
+
+The linear chunk index $\mathcal{I}_{\text{chunk}} \in [0, 1023]$ of a chunk $(X_{\text{chunk}}, Z_{\text{chunk}})$ within its bounding region container **SHALL** be computed as:
+
+$$\mathcal{I}_{\text{chunk}} = (Z_{\text{chunk}} \bmod 32) \times 32 + (X_{\text{chunk}} \bmod 32)$$
+
+Where $\bmod$ denotes the standard Euclidean modulo operation:
+
+$$(A \bmod 32) = A \ \& \ 31$$
+
+#### 2.3.2 Section Block Index
+
+Within a $16 \times 16 \times 16$ section, internal block coordinates $(u, v, w)$ such that $0 \le u, v, w < 16$ (representing relative $X, Y, Z$ respectively) **SHALL** be mapped to linear index $\mathcal{I}_{\text{block}} \in [0, 4095]$ using row-major $Y \to Z \to X$ ordering:
+
+$$\mathcal{I}_{\text{block}} = (v \ll 8) \mid (w \ll 4) \mid u = v \times 256 + w \times 16 + u$$
+
+#### 2.3.3 Section Biome Index
+
+Within a $4 \times 4 \times 4$ biome cell volume, internal coordinates $(u, v, w)$ such that $0 \le u, v, w < 4$ **SHALL** be mapped to linear index $\mathcal{I}_{\text{biome}} \in [0, 63]$ using row-major $Y \to Z \to X$ ordering:
+
+$$\mathcal{I}_{\text{biome}} = (v \ll 4) \mid (w \ll 2) \mid u = v \times 16 + w \times 4 + u$$
 
 ---
 
-## 2. Region Container (`.pump`)
+## Chapter 3: Region Container Architecture (`.pump`)
 
-A `.pump` file is a container format that stores up to **1024 chunks** organized in a 32×32 grid.
+### 3.1 Container Overview
 
-### File Naming & Region Coordinates
+A PUMP region container file encapsulates data for up to $1024$ chunks.
 
-Region files are stored in the dimension's region directory and named:
+* **File Naming Convention:** The container file name **SHALL** match the pattern:
+  $$\text{r.}X_{\text{region}}\text{.}Z_{\text{region}}\text{.pump}$$
+  Where $X_{\text{region}}$ and $Z_{\text{region}}$ are the decimal integer representations of the region coordinates.
 
-$$\text{r.}X\text{.}Z\text{.pump}$$
+### 3.2 Sector Subsystem
 
-Where:
-- $X = \lfloor \text{chunk\_x} / 32 \rfloor$
-- $Z = \lfloor \text{chunk\_z} / 32 \rfloor$
+* The allocation granularity of the file **SHALL** be $S = 256$ bytes (`0x100`).
+* All allocations, chunk record offsets, and structural alignments **SHALL** be integral multiples of $S$.
+* The minimum number of sectors $N_{\text{sectors}}$ required to store a contiguous record of $L$ bytes **SHALL** be:
+  $$N_{\text{sectors}}(L) = \left\lceil \frac{L}{S} \right\rceil = \left\lfloor \frac{L + S - 1}{S} \right\rfloor$$
+* Unused trailing bytes within an allocated sector run $[L, N_{\text{sectors}}(L) \times S - 1]$ constitute slack space and **SHALL** be zero-filled ($0\text{x}00$) by conforming writers.
 
-Chunk index within the region is calculated via:
+### 3.3 Header Hierarchy
 
-$$\text{index} = (Z_{\text{chunk}} \ \& \ 31) \times 32 + (X_{\text{chunk}} \ \& \ 31)$$
-
-Valid chunk indices range from `0` to `1023`.
-
-### Sector Alignment
-
-- **Sector Size (`SECTOR_BYTES`):** `256` bytes (`0x100`).
-- Sector offsets are represented as unsigned 32-bit integers (`u32`).
-- Maximum addressable file size per region file:
-
-$$2^{32} \times 256 \text{ bytes} = 1 \text{ TiB}$$
-
-- Any chunk payload written to disk is padded with zero bytes to align to the nearest multiple of `256` bytes:
-
-$$\text{sector\_count}(\text{len}) = \lceil \text{len} / 256 \rceil$$
-
-### Header Structure
-
-The file header occupies exactly **33 sectors** ($33 \times 256 = 8,448$ bytes / `0x2100` bytes):
+The container header occupies the initial 33 sectors of the file ($33 \times 256 = 8,448$ bytes / `0x2100` bytes). Data sectors begin strictly at byte offset `0x2100` (Sector index 33).
 
 ```
-+---------------------------------------------------------------+
-| Sector 0 (256 bytes): Superblock                              |
-+---------------------------------------------------------------+
-| Sectors 1..33 (8192 bytes): Chunk Location Table              |
-| (1024 entries * 8 bytes each)                                 |
-+---------------------------------------------------------------+
-| Sector 33..EOF: Chunk Payload Data Sectors                    |
-+---------------------------------------------------------------+
+Byte Offset:
+0x0000 +---------------------------------------------------------------+
+       | Sector 0: Superblock (256 bytes)                              |
+0x0100 +---------------------------------------------------------------+
+       | Sectors 1..32: Chunk Location Table                           |
+       | 1024 entries * 8 bytes = 8,192 bytes                          |
+0x2100 +---------------------------------------------------------------+
+       | Sectors 33..EOF: Allocated Chunk Frame Sectors                |
+       +---------------------------------------------------------------+
 ```
-
-#### Sector 0: Superblock (256 Bytes)
-
-All multi-byte numeric values are stored in **Big-Endian** byte order.
-
-| Byte Offset | Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `0x00..0x08` | 8 | `[u8; 8]` | `signature` | Magic signature and format version: `b"PUMP\x00\x00\x00\x01"` |
-| `0x08..0x0C` | 4 | `i32` | `region_x` | Region X coordinate |
-| `0x0C..0x10` | 4 | `i32` | `region_z` | Region Z coordinate |
-| `0x10..0x100`| 240 | `[u8; 240]` | `reserved` | Reserved for future expansion; filled with `0x00` |
-
-#### Sectors 1..33: Chunk Location Table (8,192 Bytes)
-
-Contains 1024 contiguous 8-byte entries corresponding to chunk indices `0` to `1023`.
-
-For index $i$:
-
-| Relative Offset | Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `i * 8 + 0` | 4 | `u32` | `sector_offset` | Absolute sector index where chunk record starts. `0` if chunk is absent. Must be $\ge 33$ if present. |
-| `i * 8 + 4` | 4 | `u32` | `byte_length` | Exact byte length of the chunk frame record (excluding sector padding). |
-
-### Sector Allocation & Fragmentation
-
-- Sector numbers `0..=32` are reserved for the header. Chunk payloads are allocated at sector offsets $\ge 33$.
-- Implementations track sector allocations via a dynamic free-run bitmap:
-  - When writing a chunk, search for the earliest contiguous run of free sectors of length $\text{sector\_count}(\text{byte\_length})$.
-  - If no suitable gap exists, sectors are allocated at the current end of the file.
-- Old sectors previously occupied by updated chunks are freed and made available for future chunk writes.
-- When freed sectors occur at the end of the file, the file is shrunk via truncation (`ftruncate` / `set_len`).
-
-### Crash Resilience & Write Ordering
-
-To protect against corruption during unexpected shutdowns:
-
-1. Staged chunks are compressed and prepared in memory.
-2. New sectors are allocated from the free list, and the chunk records are written to these sectors.
-3. The underlying storage is synced (`fsync` / `fdatasync`).
-4. The 8 KiB location table (and superblock) is updated in memory and written to sectors `0..32` at file offset `0`.
-5. The header update is synced to disk.
-6. Old sectors are returned to the free pool, and unused trailing file sectors are truncated.
-
-Because chunk data is guaranteed to reside on disk before the header pointers switch to point to it, a crash at any point preserves either the previous version or the newly committed version of every chunk.
 
 ---
 
-## 3. Chunk Compression Envelope
+#### 3.3.1 Superblock (`PumpSuperblock`)
 
-Every non-empty chunk entry points to a compressed frame record:
+Sector 0 **SHALL** conform to the following layout:
 
+```rust
+#[repr(C, packed)]
+pub struct PumpSuperblock {
+    pub signature: [u8; 8],   // Offset 0x00: Magic and format version
+    pub region_x: i32,        // Offset 0x08: Geographic region X
+    pub region_z: i32,        // Offset 0x0C: Geographic region Z
+    pub reserved: [u8; 240],  // Offset 0x10: Reserved padding bytes
+}
 ```
-+--------------------+---------------------+-------------------------------+
-| uncompressed_len   | checksum            | compressed_payload            |
-| (u32, 4 bytes)     | (u64, 8 bytes)      | (variable length)             |
-+--------------------+---------------------+-------------------------------+
-|<------- 12-byte Frame Header ----------->|
-```
 
-### Frame Header
-
-The frame header is **12 bytes**:
-
-| Offset | Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `0x00..0x04` | 4 | `u32` | `uncompressed_len` | Size of uncompressed chunk data in bytes (Big-Endian). Maximum allowable size: 64 MiB (`0x04000000`). |
-| `0x04..0x0C` | 8 | `u64` | `checksum` | 64-bit **XXH64** checksum (seed = 0) of the uncompressed data (Big-Endian). |
-
-### Compression Algorithm
-
-- Compressed using **Zstandard (`zstd`)**.
-- Decompression streaming decoders verify that the decompressed output byte count exactly equals `uncompressed_len`.
-
-### Integrity Checksum
-
-- The checksum algorithm is **XXH64** with seed `0`.
-- Decompressors **must** verify that `xxh64(uncompressed_data, 0) == checksum`. If the checksum or length does not match, the chunk is deemed corrupted.
+##### Valid Usage (Implicit)
+* `signature` **SHALL** be the exact 8-byte sequence:
+  ```
+  0x50 0x55 0x4D 0x50 0x00 0x00 0x00 0x01
+  ('P'  'U'  'M'  'P'  \0   \0   \0   0x01)
+  ```
+* `region_x` **SHALL** match the coordinate $X_{\text{region}}$ embedded within the filesystem name.
+* `region_z` **SHALL** match the coordinate $Z_{\text{region}}$ embedded within the filesystem name.
+* `reserved` bytes **SHALL** be zero-initialized (`0x00`) on creation. Conforming readers **SHALL** ignore the contents of `reserved` to permit forward-compatible extension flags.
 
 ---
 
-## 4. Native Chunk Payload (`PCHK` v1)
+#### 3.3.2 Chunk Location Table (`PumpChunkEntry`)
 
-The uncompressed payload begins with the magic identifier `PCHK`. All multi-byte numeric values are encoded in **Big-Endian**.
+Sectors 1 through 32 encompass an array of $1024$ contiguous 8-byte descriptors:
 
-```
-+-------------------+--------------------+--------------------+
-| Magic ("PCHK")    | Version (u8 = 1)   | Header Fields...   |
-+-------------------+--------------------+--------------------+
-| Heightmaps (optional)                                       |
-+-------------------------------------------------------------+
-| Sections (Block Palette, Biome Palette, Lighting)           |
-+-------------------------------------------------------------+
-| Scheduled Block Ticks & Fluid Ticks                         |
-+-------------------------------------------------------------+
-| Block Entities (Unnamed Java NBT Compounds)                 |
-+-------------------------------------------------------------+
-| Custom Data (Unnamed Java NBT Compound, optional)           |
-+-------------------------------------------------------------+
+```rust
+#[repr(C, packed)]
+pub struct PumpChunkEntry {
+    pub sector_offset: u32,   // Sector index of chunk record start
+    pub byte_length: u32,     // Exact unpadded byte length of chunk frame
+}
 ```
 
-### Chunk Header
+##### Valid Usage (Implicit)
+* For any index $\mathcal{I} \in [0, 1023]$:
+  * If the chunk at index $\mathcal{I}$ is non-existent, both `sector_offset` and `byte_length` **SHALL** be zero (`0`).
+  * If the chunk at index $\mathcal{I}$ is allocated:
+    * `sector_offset` **SHALL** be greater than or equal to `33` (`0x21`).
+    * `byte_length` **SHALL** be greater than `0`.
+    * The physical byte range:
+      $$[\text{sector\_offset} \times 256, \ \text{sector\_offset} \times 256 + \text{byte\_length})$$
+      **SHALL** be strictly contained within the bounds of the host container file $[0, \text{FileSize})$.
+  * Conforming writers **SHALL NOT** emit overlapping sector intervals for distinct chunk entries.
 
-| Offset | Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `0x00..0x04` | 4 | `[u8; 4]` | `magic` | ASCII bytes `b"PCHK"` (`0x50, 0x43, 0x48, 0x4B`) |
-| `0x04` | 1 | `u8` | `version` | Payload schema version. Must be `1`. |
-| `0x05..0x09` | 4 | `i32` | `data_version` | Minecraft World Data Version (e.g., `3955` for 1.21). |
-| `0x09..0x0D` | 4 | `i32` | `x` | Chunk X coordinate |
-| `0x0D..0x11` | 4 | `i32` | `z` | Chunk Z coordinate |
-| `0x11..0x15` | 4 | `i32` | `min_section_y` | Lowest section Y index (e.g., `-4` for Overworld standard, `0` for Nether/End). |
-| `0x15` | 1 | `u8` | `status` | Chunk status enum (`0..=9`):<br>`0`: Empty<br>`1`: StructureStarts<br>`2`: StructureReferences<br>`3`: Biomes<br>`4`: Terrain<br>`5`: Features<br>`6`: InitializeLight<br>`7`: Light<br>`8`: Spawn<br>`9`: Full |
-| `0x16` | 1 | `u8` | `flags` | Bitfield flags:<br>• Bit 0 (`0x01`): `is_light_correct`<br>• Bit 1 (`0x02`): `has_world_surface`<br>• Bit 2 (`0x04`): `has_motion_blocking`<br>• Bit 3 (`0x08`): `has_motion_blocking_no_leaves`<br>• Bit 4 (`0x10`): `has_custom_data`<br>• Bits 5..7: Reserved (must be `0`). |
-| `0x17..0x1F` | 8 | `u64` | `inhabited_time` | Total cumulative player inhabited time in ticks. |
+---
 
-### Heightmaps
+### 3.4 Sector Allocation and File Truncation
 
-Heightmaps are conditionally present based on `flags` bits 1, 2, and 3:
+* **Allocation Map:** Conforming implementations **SHOULD** maintain a dynamic sector occupancy bitmap in memory to track allocated sectors.
+* **Sector Allocation Strategy:** Writers **SHALL** locate a contiguous run of free sectors of length $N = N_{\text{sectors}}(\text{byte\_length})$. If no internal gap satisfies $N$, the run **SHALL** be appended to the current maximum allocated sector.
+* **Tail Truncation:** If sectors freed during a modification sequence encompass the end of the file, conforming writers **SHOULD** issue a filesystem truncation (`ftruncate`, `SetEndOfFile`) reducing the host file length to the highest active sector boundary.
 
-1. If `flags & 0x02 != 0`: **World Surface** heightmap (296 bytes)
-2. If `flags & 0x04 != 0`: **Motion Blocking** heightmap (296 bytes)
-3. If `flags & 0x08 != 0`: **Motion Blocking No Leaves** heightmap (296 bytes)
+---
 
-Each present heightmap consists of exactly **37 signed 64-bit integers** (`37 * 8 = 296` bytes), matching the standard packed representation (9 bits per entry for a 16×16 column).
+## Chapter 4: Compression Envelope & Frame Format
 
-### Sections
+Every populated chunk entry references a discrete Chunk Frame Record beginning at byte offset $\text{sector\_offset} \times 256$.
+
+### 4.1 Frame Header (`PumpChunkFrameHeader`)
+
+The framing metadata header is fixed at **12 bytes**:
+
+```rust
+#[repr(C, packed)]
+pub struct PumpChunkFrameHeader {
+    pub uncompressed_len: u32, // Byte length of decompressed payload
+    pub checksum: u64,         // XXH64 checksum of decompressed payload
+}
+```
+
+| Field Name | Type | Offset | Description |
+| :--- | :--- | :--- | :--- |
+| `uncompressed_len` | `u32` | `0x00` | Uncompressed payload size in bytes. |
+| `checksum` | `u64` | `0x04` | 64-bit xxHash (seed 0) computed over decompressed payload. |
+| `compressed_data` | `[u8]` | `0x0C` | Raw Zstandard frame payload spanning `byte_length - 12` bytes. |
+
+##### Valid Usage (Implicit)
+* `uncompressed_len` **SHALL NOT** exceed $67,108,864$ bytes ($64\text{ MiB}$).
+* `byte_length` from the chunk location table **SHALL** be strictly greater than $12$.
+* The decompressed payload output byte length **SHALL** exactly equal `uncompressed_len`.
+* The computed checksum:
+  $$\text{XXH64}(\text{decompressed\_payload}, 0)$$
+  **SHALL** bitwise match `checksum`.
+
+### 4.2 Compression Subsystem (Zstandard)
+
+* The compressed data stream **SHALL** conform to the Zstandard Compression Format [RFC 8878].
+* Conforming readers **SHALL** initialize a streaming or block decompression context supporting window sizes up to the single-chunk threshold ($64\text{ MiB}$).
+
+### 4.3 Integrity Verification (XXH64)
+
+* The integrity hash **SHALL** be evaluated using the 64-bit algorithm of xxHash (XXH64) as specified by Yann Collet.
+* The seed parameter passed to the hash invocation **SHALL** be zero (`0`).
+* If verification fails, the reader **SHALL** abort deserialization and report a corrupted chunk fault.
+
+---
+
+## Chapter 5: Native Chunk Payload Schema (`PCHK` v1)
+
+Upon decompression, the payload represents a serialized native chunk stream adhering to schema version 1.
+
+```
+Payload Binary Stream Layout:
++-------------------------------------------------------------+
+| PumpChunkHeader (31 bytes)                                 |
++-------------------------------------------------------------+
+| Packed Heightmaps (0 to 3 * 296 bytes)                      |
++-------------------------------------------------------------+
+| Section Count (u16, 2 bytes)                                |
++-------------------------------------------------------------+
+| Serialized Sections Array (Variable)                        |
+| - Block Palette + Block States                              |
+| - Biome Palette + Biome States                              |
+| - Lighting Arrays                                           |
++-------------------------------------------------------------+
+| Scheduled Block Ticks Array (u32 count + entries)           |
++-------------------------------------------------------------+
+| Scheduled Fluid Ticks Array (u32 count + entries)           |
++-------------------------------------------------------------+
+| Block Entities (u32 count + length-prefixed NBTs)           |
++-------------------------------------------------------------+
+| Custom Auxiliary Data (optional, length-prefixed NBT)       |
++-------------------------------------------------------------+
+```
+
+---
+
+### 5.1 Chunk Payload Header (`PumpChunkHeader`)
+
+```rust
+#[repr(C, packed)]
+pub struct PumpChunkHeader {
+    pub magic: [u8; 4],        // Offset 0x00: ASCII "PCHK"
+    pub version: u8,           // Offset 0x04: Schema version (Must be 1)
+    pub data_version: i32,     // Offset 0x05: Minecraft World Data Version
+    pub x: i32,                // Offset 0x09: Chunk coordinate X
+    pub z: i32,                // Offset 0x0D: Chunk coordinate Z
+    pub min_section_y: i32,    // Offset 0x11: Lowest section vertical index Y
+    pub status: u8,            // Offset 0x15: Chunk generation lifecycle state
+    pub flags: u8,             // Offset 0x16: Chunk capability bitfield flags
+    pub inhabited_time: u64,   // Offset 0x17: Total cumulative inhabited ticks
+}
+```
+
+##### Valid Usage (Implicit)
+* `magic` **SHALL** be the 4-byte sequence `b"PCHK"` (`0x50, 0x43, 0x48, 0x4B`).
+* `version` **SHALL** be `1`.
+* `x` and `z` **SHALL** match the coordinates specified by the region geographic location and table index:
+  $$x = X_{\text{region}} \times 32 + (\mathcal{I}_{\text{chunk}} \ \& \ 31)$$
+  $$z = Z_{\text{region}} \times 32 + (\mathcal{I}_{\text{chunk}} \gg 5)$$
+* `status` **SHALL** be an integer in the range $[0, 9]$, mapped according to the following enumeration:
+
+| Value | Status Identifier | Description |
+| :--- | :--- | :--- |
+| `0` | `Empty` | Chunk structure is unallocated. |
+| `1` | `StructureStarts` | Structure boundary origins generated. |
+| `2` | `StructureReferences` | Structure cross-references propagated. |
+| `3` | `Biomes` | Biome distribution generated. |
+| `4` | `Terrain` | Raw noise/terrain elevation surfaces formed. |
+| `5` | `Features` | World decoration features populated. |
+| `6` | `InitializeLight` | Light propagation state initialized. |
+| `7` | `Light` | Section lighting solved. |
+| `8` | `Spawn` | Entity/mob spawning constraints satisfied. |
+| `9` | `Full` | Chunk is completely generated. |
+
+##### Chunk Flags Bitmask Definition
+
+| Bit Index | Mask | Identifier | Semantics |
+| :--- | :--- | :--- | :--- |
+| Bit 0 | `0x01` | `LIGHT_CORRECT` | Chunk lighting is fully solved and validated. |
+| Bit 1 | `0x02` | `HAS_WORLD_SURFACE` | World surface heightmap is present in stream. |
+| Bit 2 | `0x04` | `HAS_MOTION_BLOCKING` | Motion blocking heightmap is present in stream. |
+| Bit 3 | `0x08` | `HAS_MOTION_BLOCKING_NO_LEAVES` | Motion blocking (no leaves) heightmap is present. |
+| Bit 4 | `0x10` | `HAS_CUSTOM_DATA` | Trailing custom NBT data block is present. |
+| Bits 5..7| `0xE0` | `RESERVED` | **SHALL** be zero (`0`). |
+
+---
+
+### 5.2 Packed Heightmaps
+
+If any heightmap flag bits (`0x02`, `0x04`, `0x08`) are asserted, the corresponding heightmap arrays **SHALL** appear immediately following the `PumpChunkHeader` in ascending bit order:
+
+1. `WorldSurface` (if `flags & 0x02 != 0`)
+2. `MotionBlocking` (if `flags & 0x04 != 0`)
+3. `MotionBlockingNoLeaves` (if `flags & 0x08 != 0`)
+
+* Each heightmap consists of exactly **37 signed 64-bit integers** (`[i64; 37]`, 296 bytes).
+* The 37 64-bit integers represent 256 9-bit elevation values packed continuously:
+  $$\text{Total Bits} = 256 \times 9 = 2304 \text{ bits} = 36 \times 64 \text{ bits}$$
+  The array length is padded to 37 entries to maintain direct parity with Minecraft's heightmap structures.
+
+---
+
+### 5.3 Sub-Chunk Section Stack
 
 Directly follows the heightmaps:
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 2 | `u16` | `section_count` | Number of vertical 16×16×16 sub-chunk sections (Max: 256). |
+```rust
+pub section_count: u16; // Number of vertical sections (Max: 256)
+```
 
-Sections are serialized in ascending vertical order starting from `min_section_y` up to `min_section_y + section_count - 1`.
+Sections are serialized in strictly ascending vertical order:
 
-Each section sequentially contains:
-1. Block Palette & States
-2. Biome Palette & States
-3. Light Arrays
+$$Y \in [\text{min\_section\_y}, \ \text{min\_section\_y} + \text{section\_count} - 1]$$
+
+#### 5.3.1 Section Geometry
+
+Each section represents a $16 \times 16 \times 16$ block grid ($4096$ block positions) and a $4 \times 4 \times 4$ biome grid ($64$ biome positions).
 
 ---
 
-#### Block Palette & States
+#### 5.3.2 Block State Palette and Data
 
-Coordinates within a 16×16×16 section are ordered $(y, z, x)$ in row-major layout:
+The block states for each section are serialized using one of three modes, denoted by a leading `u8 mode` tag.
 
-$$\text{index} = (y \ll 8) \mid (z \ll 4) \mid x \quad (0 \le \text{index} < 4096)$$
+##### Mode 0: Homogeneous Palette
 
-The block storage starts with a 1-byte mode flag:
+Used when all 4096 blocks within the section share a single state.
 
-##### Mode 0: Homogeneous Section (Single Block)
-Used when the entire 16×16×16 section consists of identical block states (e.g. solid air or stone).
-
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `mode` | `0` |
-| 2 | `u16` | `block_state_id` | Global Minecraft block state ID. |
+```rust
+#[repr(C, packed)]
+pub struct PumpBlockHomogeneous {
+    pub mode: u8,            // Must be 0
+    pub block_state_id: u16, // Global Minecraft Block State ID
+}
+```
 
 ##### Mode 1: Indexed Palette
-Used when the section contains between 1 and 256 unique block states.
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `mode` | `1` |
-| 2 | `u16` | `palette_len` | Palette length $N$ ($1 \le N \le 256$). |
-| $N \times 4$ | Entries | `palette` | For each palette entry $0 \le k < N$:<br>• `block_state_id: u16` (Global block state ID)<br>• `block_count: u16` (Number of blocks in this section with this state) |
-| 4096 | `[u8; 4096]` | `indices` | Flat array of 4096 byte indices into the palette, ordered by $(y, z, x)$. |
+Used when the section contains between 1 and 256 unique block states ($1 \le N \le 256$).
+
+```rust
+#[repr(C, packed)]
+pub struct PumpBlockPaletteEntry {
+    pub block_state_id: u16, // Global Minecraft Block State ID
+    pub block_count: u16,    // Frequency count in section
+}
+
+pub struct PumpBlockIndexed {
+    pub mode: u8,            // Must be 1
+    pub palette_len: u16,    // Number of unique states (N in 1..=256)
+    pub palette: Vec<PumpBlockPaletteEntry>, // Length: palette_len
+    pub indices: [u8; 4096], // Indices into palette array, ordered (Y, Z, X)
+}
+```
+
+##### Valid Usage (Implicit)
+* `palette_len` **SHALL** be in the range $[1, 256]$.
+* Every index in `indices` **SHALL** be strictly less than `palette_len`.
+* The sum of all `block_count` fields in `palette` **SHALL** equal $4096$.
 
 ##### Mode 2: Dense Storage
-Used when the section contains more than 256 unique block states.
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `mode` | `2` |
-| 8192 | `[u16; 4096]` | `states` | 4096 direct global `block_state_id: u16` entries, ordered by $(y, z, x)$. |
+Used when the section contains more than 256 distinct block states.
+
+```rust
+pub struct PumpBlockDense {
+    pub mode: u8,            // Must be 2
+    pub states: [u16; 4096], // Direct global Block State IDs, ordered (Y, Z, X)
+}
+```
 
 ---
 
-#### Biome Palette & States
+#### 5.3.3 Biome Palette and Data
 
-Biomes in modern Minecraft are sampled on a 4×4×4 grid per 16×16×16 block section (64 biome cells total). Coordinates are ordered $(y, z, x)$ in row-major layout:
-
-$$\text{index} = (y \ll 4) \mid (z \ll 2) \mid x \quad (0 \le \text{index} < 64)$$
-
-The biome storage starts with a 1-byte mode flag:
+Immediately follows the section's block data. Biomes are sampled on a $4 \times 4 \times 4$ grid ($64$ cells).
 
 ##### Mode 0: Homogeneous Biome
-Used when the entire section has a single biome.
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `mode` | `0` |
-| 1 | `u8` | `biome_id` | Biome registry numeric ID. |
+```rust
+#[repr(C, packed)]
+pub struct PumpBiomeHomogeneous {
+    pub mode: u8,     // Must be 0
+    pub biome_id: u8, // Global Biome Registry ID
+}
+```
 
-##### Mode 1: Heterogeneous Palette
-Used when multiple biomes are present in the section.
+##### Mode 1: Heterogeneous Biome Palette
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `mode` | `1` |
-| 1 | `u8` | `palette_len` | Palette length $M$ ($1 \le M \le 64$). |
-| $M \times 3$ | Entries | `palette` | For each palette entry $0 \le k < M$:<br>• `biome_id: u8`<br>• `biome_count: u16` |
-| 64 | `[u8; 64]` | `biomes` | 64 direct biome IDs ordered by $(y, z, x)$. |
+```rust
+#[repr(C, packed)]
+pub struct PumpBiomePaletteEntry {
+    pub biome_id: u8,     // Global Biome Registry ID
+    pub biome_count: u16, // Frequency count in section
+}
 
----
-
-#### Light Arrays
-
-Each section specifies its lighting data via a 1-byte bitmask:
-
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 1 | `u8` | `light_flags` | • Bit 0 (`0x01`): `has_block_light`<br>• Bit 1 (`0x02`): `has_sky_light` |
-| 0 or 2048 | `[u8; 2048]` | `block_light` | Present only if `light_flags & 0x01 != 0`. 2048 bytes of 4-bit nibbles (4096 entries). |
-| 0 or 2048 | `[u8; 2048]` | `sky_light` | Present only if `light_flags & 0x02 != 0`. 2048 bytes of 4-bit nibbles (4096 entries). |
-
-If a light flag bit is `0`, all light levels in that section are implicitly zero.
+pub struct PumpBiomeHeterogeneous {
+    pub mode: u8,         // Must be 1
+    pub palette_len: u8,  // Number of unique biomes (M in 1..=64)
+    pub palette: Vec<PumpBiomePaletteEntry>, // Length: palette_len
+    pub biomes: [u8; 64], // Direct biome IDs, ordered (Y, Z, X)
+}
+```
 
 ---
 
-### Scheduled Ticks
+#### 5.3.4 Nibble Lighting Arrays
 
-Following all chunk sections are the scheduled tick queues for blocks and fluids.
+Immediately follows the section's biome data:
 
-#### Block Ticks
+```rust
+pub light_flags: u8;
+```
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 4 | `u32` | `count` | Number of scheduled block ticks (Max: 65,536). |
-| $\text{count} \times 16$ | Entries | `ticks` | 16 bytes per tick entry: |
+* **Bit 0 (`0x01`):** `HAS_BLOCK_LIGHT`
+* **Bit 1 (`0x02`):** `HAS_SKY_LIGHT`
 
-Each block tick entry:
-- `x: i32` (World coordinate)
-- `y: i32` (World coordinate)
-- `z: i32` (World coordinate)
-- `delay: u8` (Remaining tick delay)
-- `priority: i8` (Tick priority: `-3` = ExtremelyLow, `-2` = VeryLow, `-1` = Low, `0` = Normal, `1` = High, `2` = VeryHigh, `3` = ExtremelyHigh)
-- `block_id: u16` (Block definition numeric ID)
+If `HAS_BLOCK_LIGHT` is asserted, exactly **2048 bytes** (`[u8; 2048]`) follow, representing 4096 4-bit nibbles for block light levels.
 
-#### Fluid Ticks
+If `HAS_SKY_LIGHT` is asserted, exactly **2048 bytes** (`[u8; 2048]`) follow, representing 4096 4-bit nibbles for sky light levels.
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 4 | `u32` | `count` | Number of scheduled fluid ticks (Max: 65,536). |
-| $\text{count} \times 16$ | Entries | `ticks` | 16 bytes per tick entry: |
+Nibbles are packed such that:
+* Low nibble (`byte & 0x0F`): Even block linear index $2k$.
+* High nibble (`(byte >> 4) & 0x0F`): Odd block linear index $2k + 1$.
 
-Each fluid tick entry:
-- `x: i32` (World coordinate)
-- `y: i32` (World coordinate)
-- `z: i32` (World coordinate)
-- `delay: u8` (Remaining tick delay)
-- `priority: i8` (Tick priority)
-- `fluid_id: u16` (Fluid definition numeric ID)
+If a flag bit is not set, all lighting levels for that category are implicitly zero.
 
 ---
 
-### Block Entities
+### 5.4 Scheduled Tick Queues
 
-Following the scheduled ticks is the list of block entities:
+Following all section definitions, scheduled ticks are serialized as two sequential length-prefixed arrays:
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 4 | `u32` | `count` | Number of block entities (Max: 65,536). |
-| Variable | Entries | `block_entities` | Contiguous block entity entries. |
+#### 5.4.1 Scheduled Block Ticks
 
-Each block entity is encoded as:
-- `len: u32`: Exact byte length of the following NBT payload.
-- `payload: [u8; len]`: Standard Java-format unnamed NBT Compound tag (`TAG_Compound`) containing:
-  - `x: TAG_Int`
-  - `y: TAG_Int`
-  - `z: TAG_Int`
-  - `id: TAG_String` (Entity identifier, e.g. `"minecraft:chest"`)
-  - Any item inventories, custom names, or container properties.
+```rust
+pub block_tick_count: u32; // Maximum: 65,536
+```
 
----
+Followed by `block_tick_count` records of 16 bytes:
 
-### Custom Data
+```rust
+#[repr(C, packed)]
+pub struct PumpScheduledTick {
+    pub x: i32,         // Absolute World Coordinate X
+    pub y: i32,         // Absolute World Coordinate Y
+    pub z: i32,         // Absolute World Coordinate Z
+    pub delay: u8,      // Remaining execution tick delay
+    pub priority: i8,   // Priority level (-3 to 3)
+    pub target_id: u16, // Numeric Block or Fluid ID
+}
+```
 
-If bit 4 (`0x10`) of `flags` is set, custom chunk metadata is encoded at the end of the payload:
+#### 5.4.2 Scheduled Fluid Ticks
 
-| Size | Type | Name | Description |
-| :--- | :--- | :--- | :--- |
-| 4 | `u32` | `len` | Exact byte length of custom data NBT payload. |
-| `len` | `[u8; len]` | `payload` | Standard Java-format unnamed NBT Compound tag (`TAG_Compound`). |
+```rust
+pub fluid_tick_count: u32; // Maximum: 65,536
+```
 
-This tag allows server implementations and plugins to persist custom properties, modded tags, or arbitrary auxiliary data without breaking standard chunk readers.
-
----
-
-## 5. Anvil Compatibility & Mapping
-
-A `.pump` file losslessly represents all vanilla Minecraft world data:
-
-- **Coordinate Systems:** Identical to Anvil (`r.X.Z` maps to the exact same $32 \times 32$ chunks).
-- **Block State & Biome IDs:** Mapped to their respective global Minecraft runtime IDs. Converters parse vanilla block states (`Name` + `Properties` compounds) into global IDs and vice-versa.
-- **Heightmaps:** The three standard vanilla heightmaps (`WORLD_SURFACE`, `MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`) map directly to the 37 longs representation.
-- **Lighting:** Vanilla nibble arrays map 1:1 to the 2048-byte full light buffers.
-- **Ticks:** Anvil `block_ticks` and `fluid_ticks` NBT lists map 1:1 with the scheduled tick records.
-- **Block Entities:** Retain their identical NBT compound tags.
-
-When converting from Anvil to PUMP, any non-standard chunk-level root tags that do not belong to the standard schema are preserved in the `custom_data` compound.
+Followed by `fluid_tick_count` records of 16 bytes using the `PumpScheduledTick` structure layout.
 
 ---
 
-## 6. Security & Resource Bounds
+### 5.5 Block Entity Storage
 
-To ensure robust operation in multi-tenant or untrusted environments, parsers **must** enforce the following bounds:
+Following scheduled fluid ticks, block entities are stored as an array of length-prefixed unnamed Java NBT Compound tags:
 
-1. **Maximum Chunk Decompressed Size:** Maximum $64\text{ MiB}$ (`67,108,864` bytes). Any chunk record advertising a higher `uncompressed_len` must be rejected immediately before allocating decompression memory.
-2. **Checksum Verification:** The XXH64 checksum must be validated against the uncompressed payload.
-3. **Maximum Section Count:** Maximum 256 sections per chunk.
-4. **Maximum Ticks Count:** Maximum 65,536 block ticks and 65,536 fluid ticks per chunk.
-5. **Maximum Block Entities:** Maximum 65,536 block entities per chunk.
-6. **Sector Offset Sanity:** In `.pump` containers, `sector_offset` must be either `0` (empty) or $\ge 33$. The calculated byte range $(\text{sector\_offset} \times 256 + \text{byte\_length})$ must not exceed the actual file size.
+```rust
+pub block_entity_count: u32; // Maximum: 65,536
+```
+
+Followed by `block_entity_count` entries of:
+
+```rust
+pub struct PumpBlockEntityEntry {
+    pub byte_length: u32,     // Length of NBT payload in bytes
+    pub nbt_payload: Vec<u8>, // Unnamed TAG_Compound byte stream
+}
+```
+
+##### Valid Usage (Implicit)
+* `nbt_payload` **SHALL** parse as a valid unnamed `TAG_Compound`.
+* The parsed compound **SHALL** contain integer coordinate tags `"x"`, `"y"`, and `"z"`, and a string identifier tag `"id"`.
+
+---
+
+### 5.6 Custom Metadata Extension
+
+If bit 4 (`0x10`) of `PumpChunkHeader.flags` is asserted, the end of the stream **SHALL** contain an arbitrary auxiliary NBT data block:
+
+```rust
+pub custom_data_length: u32;   // Length of custom NBT payload
+pub custom_data_nbt: Vec<u8>,  // Unnamed TAG_Compound payload
+```
+
+Conforming readers **SHALL** preserve this compound across transcoding and write cycles to avoid stripping plugin or mod metadata.
+
+---
+
+## Chapter 6: Transaction Lifecycle & Consistency Model
+
+### 6.1 Read Operation Sequence
+
+To perform a conformant chunk read:
+
+1. Read Sector 0 (`PumpSuperblock`). Verify `signature == "PUMP\0\0\0\1"`.
+2. Compute $\mathcal{I}_{\text{chunk}} = (Z_{\text{chunk}} \ \& \ 31) \times 32 + (X_{\text{chunk}} \ \& \ 31)$.
+3. Seek to `0x0100 + (index * 8)`. Read `PumpChunkEntry`.
+4. If `sector_offset == 0` or `byte_length == 0`, chunk is unallocated; terminate with `None`.
+5. Seek to `sector_offset * 256`. Read `byte_length` bytes into buffer $\mathcal{B}$.
+6. Parse 12-byte `PumpChunkFrameHeader`. Verify `uncompressed_len <= 64 MiB`.
+7. Decompress payload using Zstandard. Verify decompressed size matches `uncompressed_len`.
+8. Compute $\text{XXH64}(\text{decompressed}, 0)$. Verify equality with header `checksum`.
+9. Parse `PumpChunkHeader` and trailing section arrays.
+
+---
+
+### 6.2 Atomic Commit Write Protocol
+
+To ensure resistance to torn writes without external journaling files, conforming writers **SHALL** execute writes according to the following strict phased sequence:
+
+```mermaid
+sequenceDiagram
+    participant Mem as Memory Cache
+    participant Rayon as Compression Workers
+    participant Sectors as Data Sectors (33..EOF)
+    participant Header as Header (Sectors 0..32)
+
+    Note over Mem,Rayon: Phase 1: Parallel Framing
+    Mem->>Rayon: Serialize PCHK & Compress via Zstd
+    Rayon-->>Mem: Return Chunk Frames (Header + Compressed Data)
+
+    Note over Mem,Sectors: Phase 2: Copy-on-Write Allocation
+    Mem->>Mem: Allocate new sectors from free list
+    Mem->>Sectors: Write chunk frames into free sectors
+    Mem->>Sectors: Issue storage barrier (fdatasync / fsync)
+
+    Note over Mem,Header: Phase 3: Atomic Pointer Swap
+    Mem->>Header: Update location table & write Sectors 0..32
+    Mem->>Header: Issue storage barrier (fdatasync / fsync)
+
+    Note over Mem,Sectors: Phase 4: Reclaim & Truncate
+    Mem->>Mem: Release old chunk sectors to free pool
+    Mem->>Sectors: Truncate trailing unallocated sectors
+```
+
+1. **Phase 1 (Preparation):** Serialize modified chunks to `PCHK` format. Execute Zstandard compression and compute XXH64 checksums.
+2. **Phase 2 (Allocation & Data Flush):**
+   * Search sector occupancy bitmap for contiguous free sectors matching $N_{\text{sectors}}(\text{byte\_length})$.
+   * Write padded chunk frames into newly assigned sectors.
+   * **Write Barrier 1:** Execute an explicit hardware storage flush (`fdatasync` / `FlushFileBuffers`). Chunk data is guaranteed to reside on non-volatile media before advancing.
+3. **Phase 3 (Atomic Header Commit):**
+   * Update the in-memory `PumpChunkEntry` records for all committed chunks.
+   * Write the complete 33-sector header (`0x0000..0x2100`) to disk.
+   * **Write Barrier 2:** Execute a second storage flush. The header commit is now durable.
+4. **Phase 4 (Reclamation & Truncation):**
+   * Mark previously occupied sector runs as free in the occupancy bitmap.
+   * If freed sectors are located at the end of the file, issue a truncation call to shrink the container.
+
+---
+
+### 6.3 Crash Consistency Guarantees
+
+* **Power Failure during Phase 2:** The file header remains unmodified on disk, continuing to address the pre-existing, valid chunk sector locations. The newly written sectors are orphaned and will be reclaimed automatically on subsequent open.
+* **Power Failure during Phase 3:** Because Phase 2 was flushed to storage, an atomic sector write will either leave the old location table or update to the new location table. Under standard POSIX/NTFS sector write semantics, no torn chunk frames can be visible.
+* At no point does a valid chunk pointer reference uncommitted or partially written storage.
+
+---
+
+## Chapter 7: Security Considerations & Resource Bounds
+
+### 7.1 Denial of Service & Memory Exhaustion Bounds
+
+Conforming implementations **SHALL** enforce the following structural bounds during deserialization to guard against malicious inputs or damaged files:
+
+| Identifier | Maximum Upper Bound | Action on Violation |
+| :--- | :--- | :--- |
+| `PUMP_MAX_DECOMPRESSED_CHUNK_BYTES` | $67,108,864$ ($64\text{ MiB}$) | Immediately reject frame prior to decompression. |
+| `PUMP_MAX_SECTIONS` | $256$ sections | Reject payload; abort parsing. |
+| `PUMP_MAX_TICKS` | $65,536$ ticks | Reject payload; abort parsing. |
+| `PUMP_MAX_BLOCK_ENTITIES` | $65,536$ entities | Reject payload; abort parsing. |
+
+### 7.2 Structural Validation Invariants
+
+1. **Minimum Frame Size:** A chunk entry with `byte_length < 12` is invalid.
+2. **Sector Index Floor:** A non-zero `sector_offset` strictly less than `33` **SHALL** be treated as a fatal corrupt container header.
+3. **File Span Check:** The interval $[\text{sector\_offset} \times 256, \ \text{sector\_offset} \times 256 + \text{byte\_length}]$ **SHALL NOT** exceed the actual physical file size.
+
+---
+
+## Appendix A: Rust Data Type Bindings
+
+The following Rust declarations specify the binary layout and constants for the PUMP container and `PCHK` chunk schema:
+
+```rust
+pub const PUMP_SECTOR_SIZE: usize = 256;
+pub const PUMP_HEADER_SECTORS: usize = 33;
+pub const PUMP_HEADER_BYTES: usize = PUMP_HEADER_SECTORS * PUMP_SECTOR_SIZE;
+pub const PUMP_CHUNK_COUNT: usize = 1024;
+pub const PUMP_MAX_DECOMPRESSED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+pub const PUMP_SIGNATURE: [u8; 8] = *b"PUMP\x00\x00\x00\x01";
+pub const PUMP_CHUNK_MAGIC: [u8; 4] = *b"PCHK";
+
+/// Sector 0: Container Superblock (256 bytes)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpSuperblock {
+    pub signature: [u8; 8],
+    pub region_x: i32,
+    pub region_z: i32,
+    pub reserved: [u8; 240],
+}
+
+/// Sectors 1..32: Chunk Location Table Entry (8 bytes)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpChunkEntry {
+    pub sector_offset: u32,
+    pub byte_length: u32,
+}
+
+/// Chunk Compression Framing Header (12 bytes)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpChunkFrameHeader {
+    pub uncompressed_len: u32,
+    pub checksum: u64,
+}
+
+/// Uncompressed Chunk Payload Header (31 bytes)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpChunkHeader {
+    pub magic: [u8; 4],
+    pub version: u8,
+    pub data_version: i32,
+    pub x: i32,
+    pub z: i32,
+    pub min_section_y: i32,
+    pub status: u8,
+    pub flags: u8,
+    pub inhabited_time: u64,
+}
+
+/// Scheduled Block or Fluid Tick Record (16 bytes)
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PumpScheduledTick {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub delay: u8,
+    pub priority: i8,
+    pub target_id: u16,
+}
+```
+
+---
+
+## Appendix B: Anvil Compatibility and Transcoding
+
+Conversion between Anvil (`.mca`) and PUMP (`.pump`) **SHALL** preserve the following equivalences:
+
+1. **Section Palette Translation:**
+   * Anvil's string-based block state compound definitions (`Name` + `Properties`) map directly to the numeric `block_state_id: u16` defined in the server's global state registry for the corresponding `data_version`.
+   * Unindexed/dense Anvil sub-chunks are packed into Mode 1 (Indexed) or Mode 2 (Dense) PUMP sections.
+2. **Biome Preservation:**
+   * Anvil biome palette strings map to 8-bit numeric IDs.
+3. **Lighting Data:**
+   * Nibble arrays in Anvil sub-chunks (`BlockLight`, `SkyLight`) map directly to the 2048-byte nibble arrays in PUMP.
+4. **Auxiliary Root Data:**
+   * Non-standard compound tags in Anvil chunks (such as custom mod parameters or Forge capabilities) that have no counterpart in `PCHK` **SHALL** be preserved in the `custom_data` NBT compound tag.

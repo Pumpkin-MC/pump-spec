@@ -1,56 +1,62 @@
 # PUMP Format Specification
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Specification Version](https://img.shields.io/badge/spec-v1.0-green.svg)](SPEC.md)
+[![Specification Version](https://img.shields.io/badge/spec-v1.0.0-green.svg)](SPEC.md)
 
-Specification, documentation, and reference materials for **PUMP**, the high-performance, crash-resilient Minecraft world region and chunk format developed by [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin).
+This repository contains the normative standard specification, data layout definitions, and architectural documentation for **PUMP**, a high-performance, crash-resilient Minecraft world region container and chunk storage architecture developed by [Pumpkin](https://github.com/Pumpkin-MC/Pumpkin).
 
 ---
 
-## Overview
+## Architectural Highlights
 
 Minecraft's legacy **Anvil** (`.mca`) format has served the community for years, but poses significant bottlenecks for modern, multi-threaded Minecraft servers:
 
-- **4 KiB Sector Padding Waste:** Even a 100-byte change forces an allocation of at least 4 KiB, causing massive internal fragmentation (often wasting 30–50% of disk space on empty padding).
-- **Vulnerability to Torn Writes:** In-place updates can lead to corrupted chunk headers or sliced writes if the server crashes or loses power mid-save.
-- **Java NBT Bottleneck:** Storing tabular section data (block palettes, block states, biomes, lighting nibbles, heightmaps) in verbose NBT creates high CPU serialization overhead and memory churn.
+- **4 KiB Sector Padding Waste:** Even a 100-byte modification forces an allocation of at least 4 KiB, causing massive internal fragmentation (often wasting 30–50% of disk space on empty padding).
+- **Vulnerability to Torn Writes:** In-place sector overwriting can lead to corrupted chunk headers or sliced writes if the host process crashes or suffers power failure during save operations.
+- **Java NBT Serialization Overhead:** Storing tabular section data (block palettes, block states, biomes, lighting nibbles, heightmaps) in verbose NBT creates high CPU serialization overhead and excessive memory allocation churn.
 
-**PUMP** solves these issues with a modern storage architecture:
+**PUMP** addresses these architectural limitations:
 
-1. **256-Byte Sector Granularity:** 16× finer sector alignment than Anvil, reducing slack space waste to virtually zero.
-2. **Copy-on-Write Crash Safety:** New chunk revisions are written to free sectors and synced before the 8 KiB file header updates. A sudden crash leaves every chunk intact in either its old or new version.
+1. **256-Byte Sector Granularity:** 16× finer sector alignment than Anvil, reducing internal fragmentation and slack space to virtually zero.
+2. **Copy-on-Write Crash Safety:** New chunk revisions are written to unassigned sectors and synced before the 8 KiB file header commits. A sudden failure leaves every chunk intact in either its previous or committed state.
 3. **Zstandard + XXH64:** High compression ratios and multi-threaded throughput with robust 64-bit integrity verification.
-4. **`PCHK` Binary Chunk Format:** Replaces heavyweight NBT for sections, biomes, and lighting with direct, bit-packed structures, while retaining standard unnamed NBT exclusively for dynamic block entities and custom plugin data.
+4. **`PCHK` Binary Chunk Schema:** Eliminates NBT overhead for tabular section, biome, and lighting arrays through direct, bit-packed binary structures, while retaining standard unnamed NBT exclusively for dynamic block entities and auxiliary metadata.
 
 ---
 
-## Specification
+## Normative Specification
 
-The complete formal specification is documented in [**SPEC.md**](SPEC.md):
+The complete, formal specification is maintained in [**SPEC.md**](SPEC.md):
 
-- [1. Overview & Comparison with Anvil/Linear](SPEC.md#1-overview)
-- [2. Region Container (`.pump`)](SPEC.md#2-region-container-pump)
-  - Sector layout, 256-byte superblock, 1024-entry offset/length table, allocation bitmap, and atomic flush sequence.
-- [3. Chunk Compression Envelope](SPEC.md#3-chunk-compression-envelope)
-  - 12-byte frame header (`uncompressed_len: u32` + `checksum: u64` XXH64) and Zstd compression.
-- [4. Native Chunk Payload (`PCHK` v1)](SPEC.md#4-native-chunk-payload-pchk-v1)
-  - Header, heightmaps, homogeneous/indexed/dense block and biome palettes, nibble-packed lighting, scheduled tick queues, block entities, and custom metadata.
-- [5. Anvil Compatibility & Mapping](SPEC.md#5-anvil-compatibility--mapping)
-- [6. Security & Resource Bounds](SPEC.md#6-security--resource-bounds)
+- [Chapter 1: Document Conventions & Conformance](SPEC.md#chapter-1-document-conventions--conformance)
+- [Chapter 2: Numerical Representations & Coordinate Systems](SPEC.md#chapter-2-numerical-representations--coordinate-systems)
+- [Chapter 3: Region Container Architecture (`.pump`)](SPEC.md#chapter-3-region-container-architecture-pump)
+  - Sector layout, 256-byte superblock (`PumpSuperblock`), 1024-entry location table (`PumpChunkEntry`), allocation bitmap, and file truncation.
+- [Chapter 4: Compression Envelope & Frame Format](SPEC.md#chapter-4-compression-envelope--frame-format)
+  - 12-byte frame header (`PumpChunkFrameHeader`), Zstandard streaming decompression, and XXH64 integrity validation.
+- [Chapter 5: Native Chunk Payload Schema (`PCHK` v1)](SPEC.md#chapter-5-native-chunk-payload-schema-pchk-v1)
+  - Header (`PumpChunkHeader`), packed heightmaps, homogeneous/indexed/dense block and biome palettes, nibble-packed lighting buffers, scheduled tick queues, block entities, and custom extension compounds.
+- [Chapter 6: Transaction Lifecycle & Consistency Model](SPEC.md#chapter-6-transaction-lifecycle--consistency-model)
+  - Formal read sequence, phased atomic commit protocol with hardware write barriers, and crash consistency proofs.
+- [Chapter 7: Security Considerations & Resource Bounds](SPEC.md#chapter-7-security-considerations--resource-bounds)
+  - Memory exhaustion limits (64 MiB decompressed ceiling, maximum section counts) and structural validation invariants.
+- [Appendix A: Rust Data Type Bindings](SPEC.md#appendix-a-rust-data-type-bindings)
+  - Reference Rust constants and layout type definitions.
+- [Appendix B: Anvil Compatibility and Transcoding](SPEC.md#appendix-b-anvil-compatibility-and-transcoding)
 
 ---
 
-## Implementations & Ecosystem
+## Reference Implementations & Tooling
 
-- **[Pumpkin](https://github.com/Pumpkin-MC/Pumpkin):** The flagship Minecraft server in Rust utilizes `.pump` as its default world format, including built-in bi-directional converters between Anvil, Linear, and PUMP.
+* **[Pumpkin](https://github.com/Pumpkin-MC/Pumpkin):** The high-performance Minecraft server in Rust utilizes `.pump` as its default world storage engine, featuring full bi-directional transcoding between Anvil, Linear, and PUMP.
 
 ---
 
 ## License
 
-This specification and related materials are dual-licensed under either:
+This specification and associated definitions are dual-licensed under either:
 
-- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
-- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+* **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+* **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
 
 at your option.
